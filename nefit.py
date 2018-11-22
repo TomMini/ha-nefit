@@ -11,11 +11,12 @@ REQUIREMENTS = ['nefit-client']
 import logging
 from datetime import datetime, timedelta
 import math
+import yaml
 #import asyncio
 import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
-from homeassistant.components.climate import (ClimateDevice, PLATFORM_SCHEMA,
+from homeassistant.components.climate import (ClimateDevice, DOMAIN, PLATFORM_SCHEMA,
                                               STATE_AUTO, STATE_MANUAL, STATE_IDLE,
                                               SUPPORT_TARGET_TEMPERATURE,
                                               SUPPORT_OPERATION_MODE, SUPPORT_ON_OFF)
@@ -39,6 +40,8 @@ OPERATION_MANUAL = "heat" #manual
 OPERATION_AUTO = "auto"
 OPERATION_HOLIDAY = "off"
 
+SERVICE_USER_HOME = "nefit_user_home"
+SERVICE_USER_AWAY = "nefit_user_away"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -50,6 +53,17 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_HOLIDAY_DURATION, default=31): vol.Coerce(int)
 })
 
+USERPROFILE_PROFILE_ID = 'profile_id'
+USERPROFILE_NAME = 'name'
+
+YAML_USERPROFILES = 'nefit_hed_userprofiles.yaml'
+
+USERPROFILE_SCHEMA = vol.Schema({
+    vol.Required(USERPROFILE_PROFILE_ID): cv.string,
+    vol.Required(USERPROFILE_NAME): cv.string
+})
+
+
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Nefit thermostat."""
     name = config.get(CONF_NAME)
@@ -59,8 +73,22 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     holiday_temp = config.get(CONF_HOLIDAY_TEMP)
     holiday_duration = config.get(CONF_HOLIDAY_DURATION)
 
-    add_devices([NefitThermostat(
-        hass, name, serial, accesskey, password, holiday_temp, holiday_duration)], True)
+    thermostat = NefitThermostat(
+        hass, name, serial, accesskey, password, holiday_temp, holiday_duration)
+
+    def user_home(call):
+        """Service to call directly directly into nefit to set user home."""
+        profile_id = call.data[USERPROFILE_PROFILE_ID]
+        thermostat.set_hed_user_detected(profile_id, True)
+
+    def user_away(call):
+        """Service to call directly directly into nefit to set user away."""
+        profile_id = call.data[USERPROFILE_PROFILE_ID]
+        thermostat.set_hed_user_detected(profile_id, False)
+
+    add_devices([thermostat], True)
+    hass.services.register(DOMAIN, SERVICE_USER_HOME, user_home)
+    hass.services.register(DOMAIN, SERVICE_USER_AWAY, user_away)
 
 
 class NefitThermostat(ClimateDevice):
@@ -76,16 +104,19 @@ class NefitThermostat(ClimateDevice):
         self._unit_of_measurement = TEMP_CELSIUS
         self._data = {}
         self._attributes = {}
-        self._attributes["connection_error_count"] = 0
+        self._attributes['connection_error_count'] = 0
         self._operation_list = [OPERATION_MANUAL, OPERATION_AUTO, OPERATION_HOLIDAY]
+        self._target_temperature = None
         self.override_target_temp = False
         self.new_target_temp = 0
         self._manual = False
         self._holiday_mode = False
         self._holiday_temp = holiday_temp
         self._holiday_duration = holiday_duration
+        self._hed_enabled = False
+        self._hed_profiles = {}
 
-        _LOGGER.debug("Constructor for %s called.", self._name)
+        _LOGGER.debug('Constructor for %s called.', self._name)
 
         hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP,
                              self._shutdown)
@@ -94,6 +125,7 @@ class NefitThermostat(ClimateDevice):
                                    access_key=self._accesskey,
                                    password=self._password)
         self._client.connect()
+        self.detect_hed()
 
 
     @property
@@ -113,62 +145,62 @@ class NefitThermostat(ClimateDevice):
 
     def update(self):
         """Get latest data"""
-        _LOGGER.debug("update called.")
+        _LOGGER.debug('update called.')
 
         try:
             data = self._client.get_status()
-            _LOGGER.debug("update finished. result=%s", data)
+            _LOGGER.debug('update finished. result=%s', data)
 
-            if isinstance(data, dict) and "user mode" in data:
-                self._attributes["connection_state"] = "ok"
-                self._manual = (data.get("user mode") == "manual")
+            if isinstance(data, dict) and 'user mode' in data:
+                self._attributes['connection_state'] = 'ok'
+                self._manual = (data.get('user mode') == 'manual')
             else:
-                self._attributes["connection_state"] = "error"
-                self._attributes["connection_error_count"] += self._attributes["connection_error_count"]
+                self._attributes['connection_state'] = 'error'
+                self._attributes['connection_error_count'] += self._attributes['connection_error_count']
 
             if data:
                 self._data = data
 
-            self._attributes["boiler_indicator"] = self._data.get("boiler indicator")
-            self._attributes["control"] = self._data.get("control")
+            self._attributes['boiler_indicator'] = self._data.get('boiler indicator')
+            self._attributes['control'] = self._data.get('control')
 
             year_total, year_total_uom = self._client.get_year_total()
-            _LOGGER.debug("Fetched get_year_total: %s %s", year_total, year_total_uom)
-            self._attributes["year_total"] = year_total
-            self._attributes["year_total_unit_of_measure"] = year_total_uom
+            _LOGGER.debug('Fetched get_year_total: %s %s', year_total, year_total_uom)
+            self._attributes['year_total'] = year_total
+            self._attributes['year_total_unit_of_measure'] = year_total_uom
 
-            r = self._client.get("/ecus/rrc/userprogram/activeprogram")
-            self._attributes["active_program"] = r.get("value")
+            r = self._client.get('/ecus/rrc/userprogram/activeprogram')
+            self._attributes['active_program'] = r.get('value')
 
-            r = self._client.get("/ecus/rrc/dayassunday/day10/active")
-            self._attributes["today_as_sunday"] = (r.get("value") == "on")
+            r = self._client.get('/ecus/rrc/dayassunday/day10/active')
+            self._attributes['today_as_sunday'] = (r.get('value') == 'on')
 
-            r = self._client.get("/ecus/rrc/dayassunday/day11/active")
-            self._attributes["tomorrow_as_sunday"] = (r.get("value") == "on")
+            r = self._client.get('/ecus/rrc/dayassunday/day11/active')
+            self._attributes['tomorrow_as_sunday'] = (r.get('value') == 'on')
 
-            r = self._client.get("/system/appliance/systemPressure")
-            self._attributes["system_pressure"] = r.get("value")
+            r = self._client.get('/system/appliance/systemPressure')
+            self._attributes['system_pressure'] = r.get('value')
 
-            r = self._client.get("/heatingCircuits/hc1/actualSupplyTemperature")
-            self._attributes["supply_temp"] = r.get("value")
+            r = self._client.get('/heatingCircuits/hc1/actualSupplyTemperature')
+            self._attributes['supply_temp'] = r.get('value')
 
-            r = self._client.get("/system/sensors/temperatures/outdoor_t1")
-            self._attributes["outside_temp"] = r.get("value")
+            r = self._client.get('/system/sensors/temperatures/outdoor_t1')
+            self._attributes['outside_temp'] = r.get('value')
 
-            r = self._client.get("/heatingCircuits/hc1/holidayMode/activated")
-            self._holiday_mode = (r.get("value") == "on")
+            r = self._client.get('/heatingCircuits/hc1/holidayMode/activated')
+            self._holiday_mode = (r.get('value') == 'on')
 
             dc = self._client.get_display_code()
-            self._attributes["display_code"] = dc
+            self._attributes['display_code'] = dc
         except Exception as exc:
-            _LOGGER.warning("Nefit api returned invalid data: %s", exc)
+            _LOGGER.warning('Nefit api returned invalid data: %s', exc)
 
     @property
     def current_temperature(self):
         """Return the current temperature."""
-        _LOGGER.debug("current_temperature called.")
+        _LOGGER.debug('current_temperature called.')
 
-        return self._data.get("in house temp", None)
+        return self._data.get('in house temp', None)
 
     @property
     def current_operation(self):
@@ -181,14 +213,13 @@ class NefitThermostat(ClimateDevice):
 
     @property
     def target_temperature(self):
-
         #update happens too fast after setting new target, so value is not changed on server yet.
         #assume for this first update that the set target was succesful
         if self.override_target_temp:
             self._target_temperature = self.new_target_temp
             self.override_target_temp = False
         else:
-            self._target_temperature = self._data.get("temp setpoint", None)
+            self._target_temperature = self._data.get('temp setpoint', None)
 
         return self._target_temperature
 
@@ -196,7 +227,7 @@ class NefitThermostat(ClimateDevice):
         """Set new target temperature."""
         try:
             temperature = kwargs.get(ATTR_TEMPERATURE)
-            _LOGGER.debug("set_temperature called (temperature=%s).", temperature)
+            _LOGGER.debug('set_temperature called (temperature=%s).', temperature)
 
             if temperature is None:
                 return None
@@ -207,20 +238,20 @@ class NefitThermostat(ClimateDevice):
             self.new_target_temp = temperature
 
         except:
-            _LOGGER.error("Error setting target temperature")
+            _LOGGER.error('Error setting target temperature')
 
     def set_operation_mode(self, operation_mode):
         """Set new target operation mode."""
-        _LOGGER.debug("set_operation_mode called mode=%s.", operation_mode)
+        _LOGGER.debug('set_operation_mode called mode=%s.', operation_mode)
         if operation_mode == OPERATION_HOLIDAY:
             self.turn_holidaymode_on()
         else:
             if self._holiday_mode:
                 self.turn_holidaymode_off()
             if operation_mode == OPERATION_MANUAL:
-                self._client.put("/heatingCircuits/hc1/usermode", {"value": "manual"})
+                self._client.put('/heatingCircuits/hc1/usermode', {'value': 'manual'})
             else:
-                self._client.put("/heatingCircuits/hc1/usermode", {"value": "clock"})
+                self._client.put('/heatingCircuits/hc1/usermode', {'value': 'clock'})
         self.schedule_update_ha_state()
 
     @property
@@ -239,7 +270,7 @@ class NefitThermostat(ClimateDevice):
         return self._manual or not self._holiday_mode
 
     def _shutdown(self, event):
-        _LOGGER.debug("shutdown")
+        _LOGGER.debug('shutdown')
         self._client.disconnect()
 
     def turn_on(self):
@@ -254,22 +285,88 @@ class NefitThermostat(ClimateDevice):
 
     def turn_holidaymode_on(self):
         if self._manual:
-            self._client.put("/heatingCircuits/hc1/usermode", {"value": "clock"})
+            self._client.put('/heatingCircuits/hc1/usermode', {'value': 'clock'})
 
-        start_data = self._client.get("/heatingCircuits/hc1/holidayMode/start")
-        start = datetime.strptime(start_data["value"], DATE_FORMAT)
+        start_data = self._client.get('/heatingCircuits/hc1/holidayMode/start')
+        start = datetime.strptime(start_data['value'], DATE_FORMAT)
         end = start + timedelta(days=self._holiday_duration)
-        self._client.put("/heatingCircuits/hc1/holidayMode/activated",
-                         {"value": "on"})
-        self._client.put("/heatingCircuits/hc1/holidayMode/temperature",
-                         {"value": self._holiday_temp})
-        self._client.put("/heatingCircuits/hc1/holidayMode/end",
-                         {"value": end.strftime(DATE_FORMAT)})
+        self._client.put('/heatingCircuits/hc1/holidayMode/activated',
+                         {'value': 'on'})
+        self._client.put('/heatingCircuits/hc1/holidayMode/temperature',
+                         {'value': self._holiday_temp})
+        self._client.put('/heatingCircuits/hc1/holidayMode/end',
+                         {'value': end.strftime(DATE_FORMAT)})
 
         self.override_target_temp = True
         self.new_target_temp = self._holiday_temp
         self._holiday_mode = True
 
     def turn_holidaymode_off(self):
-        self._client.put("/heatingCircuits/hc1/holidayMode/activated", {"value": "off"})
+        self._client.put('/heatingCircuits/hc1/holidayMode/activated', {'value': 'off'})
         self._holiday_mode = False
+
+    def set_hed_user_detected(self, profile_id, isActive):
+        value = 'on' if isActive else 'off'
+        self._client.put('/ecus/rrc/homeentrancedetection/{}/detected'.format(profile_id),
+                         {'value': value})
+
+    def get_client_value(self, url):
+        """Get a 'value' from the client"""
+        data = self._client.get(url)
+        if data is not None:
+            return data['value']
+        return None
+
+    def detect_hed(self):
+        """Detect Home Entrance Detection"""
+        data = self._client.get_status()
+        if isinstance(data, dict) and 'hed enabled' in data:
+            self._hed_enabled = data.get('hed enabled') is True
+
+        if not self._hed_enabled:
+            return
+
+        self._hed_profiles = self.load_profiles()
+
+    def load_profiles(self):
+        """Load profiles from disk and NefitClient"""
+        configfile_path = self.hass.config.path(YAML_USERPROFILES)
+        result = load_config(configfile_path)
+        for i in range(0, 10):
+            path = '/ecus/rrc/homeentrancedetection/userprofile{}/'.format(i)
+            if self.get_client_value(path + 'active') == 'on':
+                userprofile_id = 'userprofile{}'.format(i)
+                name = self.get_client_value(path + 'name')
+                profile = USERPROFILE_SCHEMA({
+                    USERPROFILE_PROFILE_ID: userprofile_id,
+                    USERPROFILE_NAME: name
+                    })
+
+                if result.get(userprofile_id, None) is None:
+                    result.update({userprofile_id: profile})
+                    update_config(configfile_path, result[userprofile_id])
+        return result
+
+def load_config(path):
+    """Load the nefit_hed_userprofiles.yaml."""
+    profiles = {}
+    try:
+        with open(path) as file:
+            data = yaml.safe_load(file)
+            if data is None:
+                return {}
+            for profile in data:
+                profiles.update({
+                    profile[USERPROFILE_PROFILE_ID]:
+                    USERPROFILE_SCHEMA(profile)
+                })
+    except FileNotFoundError:
+        # When YAML file could not be loaded/did not contain a dict
+        return {}
+
+    return profiles
+
+def update_config(path, profile):
+    """Write the nefit_hed_userprofiles.yaml."""
+    with open(path, 'a') as out:
+        yaml.dump([profile], out, default_flow_style=False)
