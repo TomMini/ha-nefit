@@ -6,7 +6,7 @@ Install the nefit library into your virtual python environment:
 ```
 (venv) $ pip install nefit-client
 ```
-Create ```custom_components/climate/``` in your homeassistant config directory and copy the file ```nefit.py``` into it.
+Create ```custom_components/nefit/``` in your homeassistant config directory and copy the file ```nefit.py``` into it.
 
 ## Configuration
 
