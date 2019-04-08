@@ -16,10 +16,10 @@ import yaml
 import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
-from homeassistant.components.climate import (ClimateDevice, DOMAIN, PLATFORM_SCHEMA,
-                                              STATE_AUTO, STATE_MANUAL, STATE_IDLE,
-                                              SUPPORT_TARGET_TEMPERATURE,
-                                              SUPPORT_OPERATION_MODE, SUPPORT_ON_OFF)
+from homeassistant.components.climate import (ClimateDevice, DOMAIN, PLATFORM_SCHEMA)
+from homeassistant.components.climate.const import (STATE_AUTO, STATE_MANUAL, STATE_IDLE,
+                                                    SUPPORT_TARGET_TEMPERATURE,
+                                                    SUPPORT_OPERATION_MODE, SUPPORT_ON_OFF)                                              
 from homeassistant.const import TEMP_CELSIUS, ATTR_TEMPERATURE
 from homeassistant.const import STATE_UNKNOWN, EVENT_HOMEASSISTANT_STOP
 
@@ -36,7 +36,7 @@ CONF_PASSWORD = "password"
 CONF_HOLIDAY_TEMP = "holiday_temp"
 CONF_HOLIDAY_DURATION = "holiday_duration"
 
-OPERATION_MANUAL = "heat" #manual
+OPERATION_MANUAL = "manual"
 OPERATION_AUTO = "auto"
 OPERATION_HOLIDAY = "off"
 
